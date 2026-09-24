@@ -1,0 +1,6 @@
+{
+  "name": "HydroGuard - Flood Monitoring & Evacuation System",
+  "description": "Real-time flood monitoring dashboard with water level alerts, rainfall telemetry, object detection, and emergency evacuation warnings.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
