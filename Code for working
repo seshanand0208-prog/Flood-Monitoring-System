@@ -1,0 +1,465 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#include <ESP32Servo.h>
+
+// LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Pins
+#define SERVO_PIN 19
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+#define DHT_PIN 4
+#define WATER_SENSOR_PIN 35
+#define RAIN_SENSOR_PIN 34
+
+// DHT
+#define DHT_TYPE DHT22
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// Servo
+Servo myServo;
+
+// Thresholds
+#define RAIN_THRESHOLD 1800
+#define WATER_HIGH_THRESHOLD 2500
+#define WATER_INCREASE_AMOUNT 80
+#define OBJECT_DISTANCE 30.0
+
+// Sensor data
+float temperature = 0;
+float humidity = 0;
+float distance = 0;
+
+int rainRaw = 0;
+int waterRaw = 0;
+int previousWaterRaw = 0;
+int waterPercent = 0;
+
+bool raining = false;
+bool waterHigh = false;
+bool waterIncreasing = false;
+bool objectDetected = false;
+bool floodWarning = false;
+
+// Servo
+int servoAngle = 0;
+int servoDirection = 1;
+
+// Timers
+unsigned long lastServoMove = 0;
+unsigned long lastDHT = 0;
+unsigned long lastUltrasonic = 0;
+unsigned long lastWaterCheck = 0;
+unsigned long lastLCD = 0;
+
+// LCD page
+int lcdPage = 0;
+
+void setup()
+{
+  Serial.begin(115200);
+
+  // LCD
+  Wire.begin(21, 22);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("FLOOD MONITOR");
+
+  lcd.setCursor(0, 1);
+  lcd.print("STARTING...");
+
+  // Sensors
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(WATER_SENSOR_PIN, INPUT);
+  pinMode(RAIN_SENSOR_PIN, INPUT);
+
+  dht.begin();
+
+  // Servo
+  myServo.setPeriodHertz(50);
+  myServo.attach(SERVO_PIN, 500, 2400);
+  myServo.write(0);
+
+  // Initial water reading
+  previousWaterRaw = analogRead(WATER_SENSOR_PIN);
+
+  delay(2000);
+
+  lcd.clear();
+}
+
+void loop()
+{
+  unsigned long now = millis();
+
+  // =================================================
+  // SMOOTH SERVO: 0 -> 180 -> 0
+  // =================================================
+
+  if (now - lastServoMove >= 20)
+  {
+    lastServoMove = now;
+
+    servoAngle += servoDirection;
+
+    if (servoAngle >= 180)
+    {
+      servoAngle = 180;
+      servoDirection = -1;
+    }
+
+    if (servoAngle <= 0)
+    {
+      servoAngle = 0;
+      servoDirection = 1;
+    }
+
+    myServo.write(servoAngle);
+  }
+
+  // =================================================
+  // REAL TEMPERATURE + HUMIDITY
+  // =================================================
+
+  if (now - lastDHT >= 2000)
+  {
+    lastDHT = now;
+
+    float newTemperature = dht.readTemperature();
+    float newHumidity = dht.readHumidity();
+
+    if (!isnan(newTemperature))
+    {
+      temperature = newTemperature;
+    }
+
+    if (!isnan(newHumidity))
+    {
+      humidity = newHumidity;
+    }
+  }
+
+  // =================================================
+  // REAL RAIN SENSOR
+  // =================================================
+
+  rainRaw = analogRead(RAIN_SENSOR_PIN);
+
+  if (rainRaw < RAIN_THRESHOLD)
+  {
+    raining = true;
+  }
+  else
+  {
+    raining = false;
+  }
+
+  // =================================================
+  // REAL WATER SENSOR
+  // =================================================
+
+  waterRaw = analogRead(WATER_SENSOR_PIN);
+
+  waterPercent = map(
+    waterRaw,
+    0,
+    4095,
+    0,
+    100
+  );
+
+  waterPercent = constrain(
+    waterPercent,
+    0,
+    100
+  );
+
+  if (waterRaw >= WATER_HIGH_THRESHOLD)
+  {
+    waterHigh = true;
+  }
+  else
+  {
+    waterHigh = false;
+  }
+
+  // =================================================
+  // WATER LEVEL RISING
+  // =================================================
+
+  if (now - lastWaterCheck >= 1000)
+  {
+    lastWaterCheck = now;
+
+    if (waterRaw >
+        previousWaterRaw + WATER_INCREASE_AMOUNT)
+    {
+      waterIncreasing = true;
+    }
+    else
+    {
+      waterIncreasing = false;
+    }
+
+    previousWaterRaw = waterRaw;
+  }
+
+  // =================================================
+  // REAL ULTRASONIC DISTANCE
+  // =================================================
+
+  if (now - lastUltrasonic >= 100)
+  {
+    lastUltrasonic = now;
+
+    distance = getDistance();
+
+    if (distance > 0 &&
+        distance <= OBJECT_DISTANCE)
+    {
+      objectDetected = true;
+    }
+    else
+    {
+      objectDetected = false;
+    }
+  }
+
+  // =================================================
+  // FLOOD WARNING
+  // =================================================
+
+  if (waterHigh ||
+      waterIncreasing ||
+      raining)
+  {
+    floodWarning = true;
+  }
+  else
+  {
+    floodWarning = false;
+  }
+
+  // =================================================
+  // LCD
+  // =================================================
+
+  if (now - lastLCD >= 2000)
+  {
+    lastLCD = now;
+
+    lcdPage++;
+
+    if (lcdPage > 5)
+    {
+      lcdPage = 0;
+    }
+
+    showLCD();
+  }
+
+  // =================================================
+  // SERIAL MONITOR
+  // =================================================
+
+  static unsigned long lastSerial = 0;
+
+  if (now - lastSerial >= 2000)
+  {
+    lastSerial = now;
+
+    Serial.println();
+    Serial.println("========== FLOOD MONITOR ==========");
+
+    Serial.print("Temperature: ");
+    Serial.print(temperature);
+    Serial.println(" C");
+
+    Serial.print("Humidity: ");
+    Serial.print(humidity);
+    Serial.println(" %");
+
+    Serial.print("Rain: ");
+    Serial.println(raining ? "RAINING" : "NO RAIN");
+
+    Serial.print("Rain Raw: ");
+    Serial.println(rainRaw);
+
+    Serial.print("Water Level: ");
+    Serial.print(waterPercent);
+    Serial.println(" %");
+
+    Serial.print("Water Raw: ");
+    Serial.println(waterRaw);
+
+    Serial.print("Water Rising: ");
+    Serial.println(waterIncreasing ? "YES" : "NO");
+
+    Serial.print("Distance: ");
+    Serial.print(distance);
+    Serial.println(" cm");
+
+    Serial.print("Object: ");
+    Serial.println(objectDetected ? "DETECTED" : "CLEAR");
+
+    Serial.print("Servo: ");
+    Serial.print(servoAngle);
+    Serial.println(" degrees");
+
+    Serial.print("Flood: ");
+    Serial.println(floodWarning ? "WARNING" : "NORMAL");
+
+    Serial.println("===================================");
+  }
+}
+
+// =================================================
+// ULTRASONIC
+// =================================================
+
+float getDistance()
+{
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(
+    ECHO_PIN,
+    HIGH,
+    25000
+  );
+
+  if (duration == 0)
+  {
+    return 0;
+  }
+
+  return duration * 0.0343 / 2.0;
+}
+
+// =================================================
+// LCD
+// =================================================
+
+void showLCD()
+{
+  lcd.clear();
+
+  // Temperature + Humidity
+  if (lcdPage == 0)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("TEMP:");
+
+    lcd.print(temperature, 1);
+    lcd.print((char)223);
+    lcd.print("C");
+
+    lcd.setCursor(0, 1);
+    lcd.print("HUM:");
+    lcd.print(humidity, 1);
+    lcd.print("%");
+  }
+
+  // Rain
+  else if (lcdPage == 1)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("RAIN STATUS");
+
+    lcd.setCursor(0, 1);
+
+    if (raining)
+    {
+      lcd.print("RAINING");
+    }
+    else
+    {
+      lcd.print("NO RAIN");
+    }
+  }
+
+  // Water
+  else if (lcdPage == 2)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("WATER LEVEL:");
+
+    lcd.setCursor(0, 1);
+
+    if (waterHigh)
+    {
+      lcd.print("LEVEL HIGH");
+    }
+    else if (waterIncreasing)
+    {
+      lcd.print("LEVEL RISING");
+    }
+    else
+    {
+      lcd.print(waterPercent);
+      lcd.print("% NORMAL");
+    }
+  }
+
+  // Flood
+  else if (lcdPage == 3)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("FLOOD WARNING");
+
+    lcd.setCursor(0, 1);
+
+    if (floodWarning)
+    {
+      lcd.print("FLOOD ALERT!");
+    }
+    else
+    {
+      lcd.print("NO FLOOD");
+    }
+  }
+
+  // Object
+  else if (lcdPage == 4)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("OBJECT STATUS");
+
+    lcd.setCursor(0, 1);
+
+    if (objectDetected)
+    {
+      lcd.print("DETECTED ");
+      lcd.print(distance, 1);
+      lcd.print("CM");
+    }
+    else
+    {
+      lcd.print("NO OBJECT");
+    }
+  }
+
+  // Servo
+  else if (lcdPage == 5)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("SERVO SCANNING");
+
+    lcd.setCursor(0, 1);
+    lcd.print("ANGLE:");
+    lcd.print(servoAngle);
+    lcd.print((char)223);
+  }
+}
